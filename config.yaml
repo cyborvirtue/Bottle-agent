@@ -1,0 +1,83 @@
+# Bottle-Agent 配置文件
+
+# LLM配置
+llm:
+  provider: "openai"  # 支持: openai
+  model: "gpt-3.5-turbo"  # OpenAI模型名称
+  api_key: ""  # 在此填入您的API密钥，或设置环境变量OPENAI_API_KEY
+  base_url: ""  # 可选：自定义API端点
+  max_tokens: 2048
+  temperature: 0.7
+  timeout: 30
+
+# 嵌入模型配置
+embedding:
+  provider: "openai"  # 支持: openai, huggingface
+  model: "text-embedding-ada-002"  # OpenAI嵌入模型
+  # model: "sentence-transformers/all-MiniLM-L6-v2"  # HuggingFace模型示例
+  api_key: ""  # OpenAI API密钥（如果使用OpenAI嵌入）
+  batch_size: 32
+  max_length: 512
+
+# 论文搜索配置
+paper_search:
+  # arXiv配置
+  arxiv:
+    base_url: "http://export.arxiv.org/api/query"
+    max_results: 20
+    sort_by: "relevance"  # relevance, lastUpdatedDate, submittedDate
+    sort_order: "descending"  # ascending, descending
+  
+  # Semantic Scholar配置
+  semantic_scholar:
+    base_url: "https://api.semanticscholar.org/graph/v1"
+    api_key: ""  # 可选：Semantic Scholar API密钥
+    max_results: 20
+    fields: "title,authors,abstract,year,url,citationCount,publicationDate,journal"
+
+# RAG系统配置
+rag:
+  # 文档处理
+  document_processing:
+    chunk_size: 1000  # 文档块大小
+    chunk_overlap: 200  # 文档块重叠
+    supported_formats: ["pdf", "txt", "md", "docx"]
+  
+  # 向量数据库
+  vector_db:
+    type: "faiss"  # 目前仅支持FAISS
+    index_type: "IndexFlatIP"  # FAISS索引类型
+    similarity_threshold: 0.7  # 相似度阈值
+  
+  # 检索配置
+  retrieval:
+    top_k: 5  # 默认检索的文档数量
+    max_context_length: 4000  # 最大上下文长度
+
+# 存储配置
+storage:
+  data_dir: "./data"  # 数据存储目录
+  knowledge_bases_dir: "./data/knowledge_bases"  # 知识库存储目录
+  cache_dir: "./data/cache"  # 缓存目录
+  logs_dir: "./logs"  # 日志目录
+
+# Web界面配置
+web:
+  host: "localhost"
+  port: 8501
+  title: "Bottle-Agent"
+  description: "轻量学术搜索与RAG Agent"
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: true
+  console_enabled: true
+
+# 性能配置
+performance:
+  max_concurrent_requests: 5
+  request_timeout: 30
+  cache_enabled: true
+  cache_ttl: 3600  # 缓存过期时间（秒）
