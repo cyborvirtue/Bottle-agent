@@ -17,18 +17,11 @@ import faiss
 import numpy as np
 from dataclasses import dataclass, asdict
 
+from .data_structures import DocumentChunk, Document
 from .document_processor import DocumentProcessor
 from .embedding_client import EmbeddingClient
+from .agent_manager import AgentManager
 from ..llm.llm_client import LLMClient
-
-
-@dataclass
-class DocumentChunk:
-    """文档块数据结构"""
-    id: str
-    content: str
-    metadata: Dict[str, Any]
-    embedding: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -60,11 +53,36 @@ class KnowledgeBaseManager:
         self.storage_path = Path(self.kb_config["storage_path"])
         self.storage_path.mkdir(parents=True, exist_ok=True)
         
+        # 初始化Agent管理器
+        self.agent_manager = AgentManager(str(self.storage_path / "agents"))
+        
+        # 加载预设Agent配置
+        try:
+            presets_file = str(self.storage_path.parent / "examples" / "agent_presets.json")
+            self.agent_manager.load_presets(presets_file)
+        except Exception as e:
+            logging.warning(f"⚠️ 加载预设Agent配置失败: {e}")
+        
         # 知识库索引文件
         self.index_file = self.storage_path / "knowledge_bases.json"
         
         # 加载知识库索引
         self.knowledge_bases = self._load_knowledge_bases_index()
+    
+    def _safe_kb_name(self, kb_name: str) -> str:
+        """将知识库名称转换为安全的文件夹名称
+        
+        Args:
+            kb_name: 原始知识库名称
+            
+        Returns:
+            安全的文件夹名称
+        """
+        # 替换不安全的字符
+        safe_name = kb_name.replace('/', '_').replace('\\', '_').replace(':', '_')
+        safe_name = safe_name.replace('<', '_').replace('>', '_').replace('|', '_')
+        safe_name = safe_name.replace('?', '_').replace('*', '_').replace('"', '_')
+        return safe_name
     
     def _load_knowledge_bases_index(self) -> Dict[str, KnowledgeBaseInfo]:
         """加载知识库索引
@@ -125,8 +143,9 @@ class KnowledgeBaseManager:
         print(f"📁 文档路径: {folder_path}")
         
         try:
-            # 创建知识库目录
-            kb_path = self.storage_path / name
+            # 创建知识库目录（使用安全的文件夹名称）
+            safe_name = self._safe_kb_name(name)
+            kb_path = self.storage_path / safe_name
             kb_path.mkdir(exist_ok=True)
             
             # 处理文档
@@ -151,10 +170,10 @@ class KnowledgeBaseManager:
             
             # 构建向量索引
             print("🔍 构建向量索引...")
-            self._build_vector_index(name, chunks)
+            self._build_vector_index(safe_name, chunks)
             
             # 保存块数据
-            self._save_chunks(name, chunks)
+            self._save_chunks(safe_name, chunks)
             
             # 更新知识库信息
             kb_info = KnowledgeBaseInfo(
@@ -342,6 +361,247 @@ class KnowledgeBaseManager:
             logging.error(f"查询知识库失败: {e}")
             return f"❌ 查询失败: {e}"
     
+    def query_stream(self, kb_name: str, query: str, top_k: int = 5):
+        """流式查询知识库
+        
+        Args:
+            kb_name: 知识库名称
+            query: 查询问题
+            top_k: 返回的相关文档数量
+            
+        Yields:
+            生成的回答片段
+        """
+        if kb_name not in self.knowledge_bases:
+            yield f"❌ 知识库 '{kb_name}' 不存在"
+            return
+        
+        try:
+            # 调试信息：显示知识库查询详情
+            print(f"🔍 [DEBUG] 查询知识库: '{kb_name}'")
+            print(f"🔍 [DEBUG] 可用知识库列表: {list(self.knowledge_bases.keys())}")
+            print(f"🔍 [DEBUG] 知识库是否存在于索引中: {kb_name in self.knowledge_bases}")
+            
+            # 加载知识库（使用安全的文件夹名称）
+            safe_name = self._safe_kb_name(kb_name)
+            print(f"🔍 [DEBUG] 安全文件夹名称: '{safe_name}'")
+            
+            kb_path = self.storage_path / safe_name
+            print(f"🔍 [DEBUG] 知识库路径: {kb_path}")
+            print(f"🔍 [DEBUG] 知识库路径是否存在: {kb_path.exists()}")
+            
+            # 加载向量索引
+            index_path = kb_path / "vector_index.faiss"  # 修正文件名
+            print(f"🔍 [DEBUG] 向量索引路径: {index_path}")
+            print(f"🔍 [DEBUG] 向量索引是否存在: {index_path.exists()}")
+            
+            if not index_path.exists():
+                # 尝试旧的文件名
+                old_index_path = kb_path / "index.faiss"
+                print(f"🔍 [DEBUG] 尝试旧索引路径: {old_index_path}")
+                print(f"🔍 [DEBUG] 旧索引路径是否存在: {old_index_path.exists()}")
+                
+                if old_index_path.exists():
+                    index_path = old_index_path
+                else:
+                    yield f"❌ 知识库 '{kb_name}' 索引不存在\n调试信息: 安全名称='{safe_name}', 路径={kb_path}"
+                    return
+            
+            index = faiss.read_index(str(index_path))
+            print(f"🔍 [DEBUG] 成功加载向量索引，维度: {index.d}, 向量数: {index.ntotal}")
+            
+            # 加载文档块
+            chunks_path = kb_path / "chunks.pkl"
+            print(f"🔍 [DEBUG] 文档块路径: {chunks_path}")
+            print(f"🔍 [DEBUG] 文档块是否存在: {chunks_path.exists()}")
+            
+            if not chunks_path.exists():
+                yield f"❌ 知识库 '{kb_name}' 文档块不存在\n调试信息: 路径={chunks_path}"
+                return
+            
+            with open(chunks_path, 'rb') as f:
+                chunks = pickle.load(f)
+            
+            # 生成查询向量
+            query_embedding = self.embedding_client.embed_text(query)
+            query_vector = np.array([query_embedding], dtype=np.float32)
+            
+            # 搜索相似文档
+            scores, indices = index.search(query_vector, top_k)
+            
+            # 获取相关文档块
+            relevant_chunks = []
+            for i, idx in enumerate(indices[0]):
+                if idx < len(chunks):
+                    relevant_chunks.append((chunks[idx], scores[0][i]))
+            
+            if not relevant_chunks:
+                yield "❌ 没有找到相关文档"
+                return
+            
+            # 构建上下文
+            context = "\n\n".join([
+                f"[文档片段 {i+1}]\n{chunk.content}\n来源: {chunk.metadata.get('source', '未知')}"
+                for i, (chunk, _) in enumerate(relevant_chunks)
+            ])
+            
+            # 生成回答
+            prompt = f"""
+基于以下文档内容回答用户问题。请确保回答准确、详细，并引用相关的文档片段。
+
+用户问题: {query}
+
+相关文档内容:
+{context}
+
+请基于上述文档内容回答问题，并在回答末尾列出参考的文档片段编号。
+
+回答:
+"""
+            
+            # 流式生成回答
+            answer_parts = []
+            for chunk in self.llm_client.generate_stream(prompt):
+                answer_parts.append(chunk)
+                yield chunk
+            
+            # 添加引用信息
+            references = "\n\n📚 参考文档:\n"
+            for i, (chunk, score) in enumerate(relevant_chunks):
+                source = chunk.metadata.get('source', '未知')
+                page = chunk.metadata.get('page', '')
+                page_info = f", 第{page}页" if page else ""
+                references += f"[{i+1}] {source}{page_info} (相似度: {score:.3f})\n"
+            
+            yield references
+        
+        except Exception as e:
+            logging.error(f"流式查询知识库失败: {e}")
+            yield f"❌ 查询失败: {e}"
+    
+    def query_stream_with_context(self, kb_name: str, query: str, chat_history: List[Dict[str, str]], top_k: int = 5, agent_name: str = "默认助手"):
+        """基于对话历史的流式查询知识库
+        
+        Args:
+            kb_name: 知识库名称
+            query: 查询问题
+            chat_history: 对话历史，格式为[{"role": "user/assistant", "content": "..."}]
+            top_k: 返回的相关文档数量
+            
+        Yields:
+            生成的回答片段
+        """
+        if kb_name not in self.knowledge_bases:
+            yield f"❌ 知识库 '{kb_name}' 不存在"
+            return
+        
+        try:
+            # 调试信息：显示知识库查询详情
+            print(f"🔍 [DEBUG] 查询知识库: '{kb_name}'")
+            print(f"🔍 [DEBUG] 可用知识库列表: {list(self.knowledge_bases.keys())}")
+            print(f"🔍 [DEBUG] 知识库是否存在于索引中: {kb_name in self.knowledge_bases}")
+            
+            # 加载知识库（使用安全的文件夹名称）
+            safe_name = self._safe_kb_name(kb_name)
+            print(f"🔍 [DEBUG] 安全文件夹名称: '{safe_name}'")
+            
+            kb_path = self.storage_path / safe_name
+            print(f"🔍 [DEBUG] 知识库路径: {kb_path}")
+            print(f"🔍 [DEBUG] 知识库路径是否存在: {kb_path.exists()}")
+            
+            # 加载向量索引
+            index_path = kb_path / "vector_index.faiss"  # 修正文件名
+            print(f"🔍 [DEBUG] 向量索引路径: {index_path}")
+            print(f"🔍 [DEBUG] 向量索引是否存在: {index_path.exists()}")
+            
+            if not index_path.exists():
+                # 尝试旧的文件名
+                old_index_path = kb_path / "index.faiss"
+                print(f"🔍 [DEBUG] 尝试旧索引路径: {old_index_path}")
+                print(f"🔍 [DEBUG] 旧索引路径是否存在: {old_index_path.exists()}")
+                
+                if old_index_path.exists():
+                    index_path = old_index_path
+                else:
+                    yield f"❌ 知识库 '{kb_name}' 索引不存在\n调试信息: 安全名称='{safe_name}', 路径={kb_path}"
+                    return
+            
+            index = faiss.read_index(str(index_path))
+            print(f"🔍 [DEBUG] 成功加载向量索引，维度: {index.d}, 向量数: {index.ntotal}")
+            
+            # 加载文档块
+            chunks_path = kb_path / "chunks.pkl"
+            print(f"🔍 [DEBUG] 文档块路径: {chunks_path}")
+            print(f"🔍 [DEBUG] 文档块是否存在: {chunks_path.exists()}")
+            
+            if not chunks_path.exists():
+                yield f"❌ 知识库 '{kb_name}' 文档块不存在\n调试信息: 路径={chunks_path}"
+                return
+            
+            with open(chunks_path, 'rb') as f:
+                chunks = pickle.load(f)
+            
+            # 生成查询向量
+            query_embedding = self.embedding_client.embed_text(query)
+            query_vector = np.array([query_embedding], dtype=np.float32)
+            
+            # 搜索相似文档
+            scores, indices = index.search(query_vector, top_k)
+            
+            # 获取相关文档块
+            relevant_chunks = []
+            for i, idx in enumerate(indices[0]):
+                if idx < len(chunks):
+                    relevant_chunks.append((chunks[idx], scores[0][i]))
+            
+            if not relevant_chunks:
+                yield "❌ 没有找到相关文档"
+                return
+            
+            # 构建上下文
+            context = "\n\n".join([
+                f"[文档片段 {i+1}]\n{chunk.content}\n来源: {chunk.metadata.get('source', '未知')}"
+                for i, (chunk, _) in enumerate(relevant_chunks)
+            ])
+            
+            # 构建包含对话历史的消息列表
+            messages = []
+            
+            # 使用指定agent的系统提示词
+            system_prompt = self.agent_manager.get_system_prompt(agent_name, context)
+            if "对话历史" not in system_prompt:
+                system_prompt += "\n\n如果用户的问题与之前的对话相关，请结合对话历史来提供连贯的回答。"
+            
+            messages.append({"role": "system", "content": system_prompt})
+            
+            # 添加对话历史（只保留最近的几轮对话以避免上下文过长）
+            recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
+            for msg in recent_history:
+                messages.append(msg)
+            
+            # 添加当前问题
+            messages.append({"role": "user", "content": query})
+            
+            # 流式生成回答
+            answer_parts = []
+            for chunk in self.llm_client.generate_stream_with_context(messages):
+                answer_parts.append(chunk)
+                yield chunk
+            
+            # 添加引用信息
+            references = "\n\n📚 参考文档:\n"
+            for i, (chunk, score) in enumerate(relevant_chunks):
+                source = chunk.metadata.get('source', '未知')
+                page = chunk.metadata.get('page', '')
+                page_info = f", 第{page}页" if page else ""
+                references += f"[{i+1}] {source}{page_info} (相似度: {score:.3f})\n"
+            
+            yield references
+        
+        except Exception as e:
+            logging.error(f"基于上下文的流式查询知识库失败: {e}")
+            yield f"❌ 查询失败: {e}"
+    
     def list_knowledge_bases(self) -> List[str]:
         """列出所有知识库
         
@@ -375,8 +635,9 @@ class KnowledgeBaseManager:
             return False
         
         try:
-            # 删除知识库文件夹
-            kb_path = self.storage_path / kb_name
+            # 删除知识库文件夹（使用安全的文件夹名称）
+            safe_name = self._safe_kb_name(kb_name)
+            kb_path = self.storage_path / safe_name
             if kb_path.exists():
                 import shutil
                 shutil.rmtree(kb_path)

@@ -5,11 +5,12 @@
 支持OpenAI、HuggingFace等多种嵌入模型
 """
 
-import openai
+from openai import OpenAI
 import numpy as np
 from typing import List, Dict, Any
 import logging
 import time
+import os
 
 # HuggingFace支持
 try:
@@ -43,12 +44,16 @@ class EmbeddingClient:
         if not api_key:
             raise ValueError("OpenAI API密钥未配置")
         
-        # 设置API密钥
-        openai.api_key = api_key
+        # 初始化OpenAI客户端
+        client_kwargs = {
+            "api_key": api_key
+        }
         
         # 设置自定义base_url（如果有）
         if self.embedding_config.get("base_url"):
-            openai.api_base = self.embedding_config["base_url"]
+            client_kwargs["base_url"] = self.embedding_config["base_url"]
+        
+        self.openai_client = OpenAI(**client_kwargs)
     
     def _init_huggingface(self):
         """初始化HuggingFace客户端"""
@@ -114,15 +119,16 @@ class EmbeddingClient:
             
             try:
                 # 调用OpenAI API
-                response = openai.Embedding.create(
+                response = self.openai_client.embeddings.create(
                     model=self.model_name,
-                    input=batch
+                    input=batch,
+                    encoding_format="float"
                 )
                 
                 # 提取嵌入向量
                 batch_embeddings = [
-                    np.array(item['embedding']) 
-                    for item in response['data']
+                    np.array(item.embedding) 
+                    for item in response.data
                 ]
                 
                 embeddings.extend(batch_embeddings)

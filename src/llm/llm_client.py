@@ -9,6 +9,8 @@ import openai
 from typing import Dict, Any, List, Optional
 import time
 import logging
+import os
+from openai import OpenAI
 
 
 class LLMClient:
@@ -18,25 +20,45 @@ class LLMClient:
         self.config = config
         self.llm_config = config["llm"]
         self.provider = self.llm_config["provider"]
+        self.client = None
         
         # 初始化客户端
         if self.provider == "openai":
             self._init_openai()
+        elif self.provider == "volcengine":
+            self._init_volcengine()
         else:
             raise ValueError(f"不支持的LLM提供商: {self.provider}")
     
     def _init_openai(self):
         """初始化OpenAI客户端"""
-        api_key = self.llm_config.get("api_key")
+        api_key = self.llm_config.get("api_key") or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OpenAI API密钥未配置")
         
-        # 设置API密钥
-        openai.api_key = api_key
+        # 创建OpenAI客户端
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=self.llm_config.get("base_url") or None,
+            timeout=self.llm_config.get("timeout", 30)
+        )
+    
+    def _init_volcengine(self):
+        """初始化火山引擎客户端"""
+        volcengine_config = self.llm_config.get("volcengine", {})
+        api_key = volcengine_config.get("api_key") or os.environ.get("ARK_API_KEY")
+        if not api_key:
+            raise ValueError("火山引擎API密钥未配置，请设置ARK_API_KEY环境变量或在配置文件中设置")
         
-        # 设置自定义base_url（如果有）
-        if self.llm_config.get("base_url"):
-            openai.api_base = self.llm_config["base_url"]
+        base_url = volcengine_config.get("base_url", "https://ark.cn-beijing.volces.com/api/v3")
+        timeout = volcengine_config.get("timeout", 1800)
+        
+        # 创建火山引擎客户端（使用OpenAI SDK兼容接口）
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout
+        )
     
     def generate(self, prompt: str, **kwargs) -> str:
         """生成文本
@@ -48,13 +70,13 @@ class LLMClient:
         Returns:
             生成的文本
         """
-        if self.provider == "openai":
-            return self._generate_openai(prompt, **kwargs)
+        if self.provider in ["openai", "volcengine"]:
+            return self._generate_unified(prompt, **kwargs)
         else:
             raise ValueError(f"不支持的LLM提供商: {self.provider}")
     
-    def _generate_openai(self, prompt: str, **kwargs) -> str:
-        """使用OpenAI生成文本
+    def _generate_unified(self, prompt: str, **kwargs) -> str:
+        """统一的文本生成方法，支持OpenAI和火山引擎
         
         Args:
             prompt: 输入提示
@@ -63,9 +85,16 @@ class LLMClient:
         Returns:
             生成的文本
         """
+        # 获取模型配置
+        if self.provider == "volcengine":
+            volcengine_config = self.llm_config.get("volcengine", {})
+            model = volcengine_config.get("model", "deepseek-r1-250120")
+        else:
+            model = self.llm_config["model"]
+        
         # 合并配置参数
         params = {
-            "model": self.llm_config["model"],
+            "model": model,
             "temperature": self.llm_config.get("temperature", 0.7),
             "max_tokens": self.llm_config.get("max_tokens", 2000),
         }
@@ -77,18 +106,71 @@ class LLMClient:
         ]
         
         try:
-            # 调用OpenAI API
-            response = openai.ChatCompletion.create(
+            # 调用API
+            response = self.client.chat.completions.create(
                 messages=messages,
                 **params
             )
             
+            # 处理火山引擎深度思考模型的特殊响应
+            if self.provider == "volcengine" and hasattr(response.choices[0].message, 'reasoning_content'):
+                reasoning = response.choices[0].message.reasoning_content
+                if reasoning:
+                    logging.info(f"深度思考过程: {reasoning[:200]}...")  # 记录思维链的前200字符
+            
             return response.choices[0].message.content.strip()
         
         except Exception as e:
-            logging.error(f"OpenAI API调用失败: {e}")
+            logging.error(f"{self.provider} API调用失败: {e}")
             raise
     
+    def _generate_unified_stream(self, prompt: str, **kwargs):
+        """统一的流式文本生成方法，支持OpenAI和火山引擎
+        
+        Args:
+            prompt: 输入提示
+            **kwargs: 额外参数
+            
+        Yields:
+            生成的文本片段
+        """
+        # 获取模型配置
+        if self.provider == "volcengine":
+            volcengine_config = self.llm_config.get("volcengine", {})
+            model = volcengine_config.get("model", "deepseek-r1-250120")
+        else:
+            model = self.llm_config["model"]
+        
+        # 合并配置参数
+        params = {
+            "model": model,
+            "temperature": self.llm_config.get("temperature", 0.7),
+            "max_tokens": self.llm_config.get("max_tokens", 2000),
+            "stream": True,
+        }
+        params.update(kwargs)
+        
+        # 构建消息
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            # 调用API
+            response = self.client.chat.completions.create(
+                messages=messages,
+                **params
+            )
+            
+            # 流式返回
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+        
+        except Exception as e:
+            logging.error(f"{self.provider} 流式API调用失败: {e}")
+            raise
+      
     def generate_with_context(self, messages: List[Dict[str, str]], **kwargs) -> str:
         """基于上下文生成文本
         
@@ -99,13 +181,43 @@ class LLMClient:
         Returns:
             生成的文本
         """
-        if self.provider == "openai":
-            return self._generate_openai_with_context(messages, **kwargs)
+        if self.provider in ["openai", "volcengine"]:
+            return self._generate_unified_with_context(messages, **kwargs)
         else:
             raise ValueError(f"不支持的LLM提供商: {self.provider}")
     
-    def _generate_openai_with_context(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """使用OpenAI基于上下文生成文本
+    def generate_stream(self, prompt: str, **kwargs):
+        """流式生成文本
+        
+        Args:
+            prompt: 输入提示
+            **kwargs: 额外参数
+            
+        Yields:
+            生成的文本片段
+        """
+        if self.provider in ["openai", "volcengine"]:
+            yield from self._generate_unified_stream(prompt, **kwargs)
+        else:
+            raise ValueError(f"不支持的LLM提供商: {self.provider}")
+    
+    def generate_stream_with_context(self, messages: List[Dict[str, str]], **kwargs):
+        """基于上下文流式生成文本
+        
+        Args:
+            messages: 消息列表，格式为[{"role": "user/assistant", "content": "..."}]
+            **kwargs: 额外参数
+            
+        Yields:
+            生成的文本片段
+        """
+        if self.provider in ["openai", "volcengine"]:
+            yield from self._generate_unified_stream_with_context(messages, **kwargs)
+        else:
+            raise ValueError(f"不支持的LLM提供商: {self.provider}")
+    
+    def _generate_unified_with_context(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        """统一的基于上下文生成文本方法，支持OpenAI和火山引擎
         
         Args:
             messages: 消息列表
@@ -114,27 +226,82 @@ class LLMClient:
         Returns:
             生成的文本
         """
+        # 获取模型配置
+        if self.provider == "volcengine":
+            volcengine_config = self.llm_config.get("volcengine", {})
+            model = volcengine_config.get("model", "deepseek-r1-250120")
+        else:
+            model = self.llm_config["model"]
+        
         # 合并配置参数
         params = {
-            "model": self.llm_config["model"],
+            "model": model,
             "temperature": self.llm_config.get("temperature", 0.7),
             "max_tokens": self.llm_config.get("max_tokens", 2000),
         }
         params.update(kwargs)
         
         try:
-            # 调用OpenAI API
-            response = openai.ChatCompletion.create(
+            # 调用API
+            response = self.client.chat.completions.create(
                 messages=messages,
                 **params
             )
             
+            # 处理火山引擎深度思考模型的特殊响应
+            if self.provider == "volcengine" and hasattr(response.choices[0].message, 'reasoning_content'):
+                reasoning = response.choices[0].message.reasoning_content
+                if reasoning:
+                    logging.info(f"深度思考过程: {reasoning[:200]}...")  # 记录思维链的前200字符
+            
             return response.choices[0].message.content.strip()
         
         except Exception as e:
-            logging.error(f"OpenAI API调用失败: {e}")
+            logging.error(f"{self.provider} API调用失败: {e}")
             raise
     
+    def _generate_unified_stream_with_context(self, messages: List[Dict[str, str]], **kwargs):
+        """统一的基于上下文流式生成文本方法，支持OpenAI和火山引擎
+        
+        Args:
+            messages: 消息列表
+            **kwargs: 额外参数
+            
+        Yields:
+            生成的文本片段
+        """
+        # 获取模型配置
+        if self.provider == "volcengine":
+            volcengine_config = self.llm_config.get("volcengine", {})
+            model = volcengine_config.get("model", "deepseek-r1-250120")
+        else:
+            model = self.llm_config["model"]
+        
+        # 合并配置参数
+        params = {
+            "model": model,
+            "temperature": self.llm_config.get("temperature", 0.7),
+            "max_tokens": self.llm_config.get("max_tokens", 2000),
+            "stream": True,
+        }
+        params.update(kwargs)
+        
+        try:
+            # 调用API
+            response = self.client.chat.completions.create(
+                messages=messages,
+                **params
+            )
+            
+            # 流式返回
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+        
+        except Exception as e:
+            logging.error(f"{self.provider} 流式API调用失败: {e}")
+            raise
+      
     def extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词
         

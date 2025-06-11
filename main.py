@@ -15,6 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config.settings import load_config
 from src.paper_search.search_engine import PaperSearchEngine
+from src.paper_search.cli_extensions import create_cli_extensions
 from src.rag_system.knowledge_base import KnowledgeBaseManager
 from src.llm.llm_client import LLMClient
 from src.rag_system.embedding_client import EmbeddingClient
@@ -54,6 +55,69 @@ def main():
         "--search", 
         type=str,
         help="直接搜索论文，输入查询关键词"
+    )
+    
+    parser.add_argument(
+        "--search-time", 
+        type=str,
+        help="按时间范围搜索论文，输入查询关键词"
+    )
+    
+    parser.add_argument(
+        "--days", 
+        type=int,
+        default=7,
+        help="时间搜索的天数范围（默认7天）"
+    )
+    
+    parser.add_argument(
+        "--start-date", 
+        type=str,
+        help="搜索开始日期 (YYYY-MM-DD)"
+    )
+    
+    parser.add_argument(
+        "--end-date", 
+        type=str,
+        help="搜索结束日期 (YYYY-MM-DD)"
+    )
+    
+    # 标签管理功能
+    parser.add_argument(
+        "--tag-action", 
+        choices=["add", "remove", "list", "update"],
+        help="标签操作: add(添加), remove(删除), list(列出), update(更新)"
+    )
+    
+    parser.add_argument(
+        "--tag-name", 
+        type=str,
+        help="标签名称"
+    )
+    
+    parser.add_argument(
+        "--tag-keywords", 
+        type=str,
+        help="标签关键词（逗号分隔）"
+    )
+    
+    parser.add_argument(
+        "--tag-categories", 
+        type=str,
+        help="标签分类（逗号分隔）"
+    )
+    
+    # 通知管理功能
+    parser.add_argument(
+        "--check-notifications", 
+        action="store_true",
+        help="检查新论文推送通知"
+    )
+    
+    parser.add_argument(
+        "--list-notifications", 
+        action="store_true",
+        help="列出推送通知"
     )
     
     # RAG功能
@@ -98,7 +162,7 @@ def main():
     parser.add_argument(
         "--config", 
         type=str,
-        default="config/config.yaml",
+        default="config.yaml",
         help="配置文件路径"
     )
     
@@ -110,8 +174,74 @@ def main():
     # 初始化组件
     search_engine = PaperSearchEngine(config)
     kb_manager = KnowledgeBaseManager(config)
+    cli_extensions = create_cli_extensions(config)
     
     try:
+        # 处理标签管理
+        if args.tag_action:
+            if args.tag_action == "add":
+                if not args.tag_name or not args.tag_keywords:
+                    print("❌ 添加标签需要指定标签名称(--tag-name)和关键词(--tag-keywords)")
+                    return
+                keywords = [k.strip() for k in args.tag_keywords.split(',')]
+                categories = [c.strip() for c in args.tag_categories.split(',')] if args.tag_categories else []
+                cli_extensions.tag_manager.add_tag(args.tag_name, keywords, categories)
+            
+            elif args.tag_action == "remove":
+                if not args.tag_name:
+                    print("❌ 删除标签需要指定标签名称(--tag-name)")
+                    return
+                cli_extensions.tag_manager.remove_tag(args.tag_name)
+            
+            elif args.tag_action == "list":
+                cli_extensions.tag_manager.display_tags()
+            
+            elif args.tag_action == "update":
+                if not args.tag_name:
+                    print("❌ 更新标签需要指定标签名称(--tag-name)")
+                    return
+                keywords = [k.strip() for k in args.tag_keywords.split(',')] if args.tag_keywords else None
+                categories = [c.strip() for c in args.tag_categories.split(',')] if args.tag_categories else None
+                cli_extensions.tag_manager.update_tag(args.tag_name, keywords=keywords, categories=categories)
+            return
+        
+        # 处理通知管理
+        if args.check_notifications:
+            print("🔔 检查新论文推送...")
+            count = search_engine.check_and_notify_new_papers()
+            if count > 0:
+                print(f"✅ 发现 {count} 篇匹配的新论文")
+                cli_extensions.tag_manager.display_notifications(limit=count)
+            else:
+                print("📭 暂无新的匹配论文")
+            return
+        
+        if args.list_notifications:
+            cli_extensions.tag_manager.display_notifications()
+            return
+        
+        # 处理时间范围搜索
+        if args.search_time:
+            print(f"🔍 搜索最近 {args.days} 天的论文: {args.search_time}")
+            results = search_engine.search_by_time_range(args.search_time, days_back=args.days)
+            search_engine.display_results(results)
+            return
+        
+        # 处理日期范围搜索
+        if args.search and (args.start_date or args.end_date):
+            date_info = ""
+            if args.start_date and args.end_date:
+                date_info = f" ({args.start_date} 到 {args.end_date})"
+            elif args.start_date:
+                date_info = f" (从 {args.start_date})"
+            elif args.end_date:
+                date_info = f" (到 {args.end_date})"
+            
+            print(f"🔍 搜索论文{date_info}: {args.search}")
+            results = search_engine.search(args.search, start_date=args.start_date, end_date=args.end_date)
+            search_engine.display_results(results)
+            return
+        
         # 处理直接搜索
         if args.search:
             print(f"🔍 搜索论文: {args.search}")
@@ -150,7 +280,7 @@ def main():
         
         # 启动交互界面
         if args.mode == "web":
-            run_web_interface(config)
+            run_streamlit_app(search_engine, kb_manager, config)
         else:
             print("💻 启动命令行界面...")
             cli = CLIInterface(search_engine, kb_manager, config)

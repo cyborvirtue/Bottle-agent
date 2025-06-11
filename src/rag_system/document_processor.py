@@ -29,16 +29,7 @@ except ImportError:
     DOCX_AVAILABLE = False
     print("⚠️  Word文档处理库未安装，将跳过DOCX文件")
 
-from .knowledge_base import DocumentChunk
-
-
-@dataclass
-class Document:
-    """文档数据结构"""
-    id: str
-    title: str
-    content: str
-    metadata: Dict[str, Any]
+from .data_structures import DocumentChunk, Document
 
 
 class DocumentProcessor:
@@ -175,6 +166,8 @@ class DocumentProcessor:
             id=doc_id,
             title=file_path.stem,
             content=content.strip(),
+            file_path=str(file_path),
+            file_type="pdf",
             metadata=metadata
         )
     
@@ -218,6 +211,8 @@ class DocumentProcessor:
                 id=doc_id,
                 title=file_path.stem,
                 content=content.strip(),
+                file_path=str(file_path),
+                file_type="txt",
                 metadata=metadata
             )
         
@@ -287,6 +282,8 @@ class DocumentProcessor:
                 id=doc_id,
                 title=file_path.stem,
                 content=content.strip(),
+                file_path=str(file_path),
+                file_type="docx",
                 metadata=metadata
             )
         

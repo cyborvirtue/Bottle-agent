@@ -42,18 +42,36 @@ pip install rich click  # 命令行增强（可选）
 
 编辑 `config.yaml` 文件：
 
+**使用OpenAI：**
 ```yaml
 llm:
+  provider: "openai"
   api_key: "your-openai-api-key-here"  # 替换为您的OpenAI API密钥
 
 embedding:
   api_key: "your-openai-api-key-here"  # 同上
 ```
 
+**使用火山引擎：**
+```yaml
+llm:
+  provider: "volcengine"
+  volcengine:
+    api_key: "your-ark-api-key-here"  # 替换为您的火山引擎API密钥
+    model: "deepseek-r1-250120"  # 火山引擎模型ID
+
+embedding:
+  api_key: "your-openai-api-key-here"  # 嵌入模型仍使用OpenAI
+```
+
 或者设置环境变量：
 
 ```bash
+# OpenAI
 export OPENAI_API_KEY="your-openai-api-key-here"
+
+# 火山引擎
+export ARK_API_KEY="your-ark-api-key-here"
 ```
 
 ## 🎯 快速测试

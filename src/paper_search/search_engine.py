@@ -7,12 +7,13 @@
 
 import requests
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timedelta
 import re
 from dataclasses import dataclass
 
 from ..llm.llm_client import LLMClient
+from .tag_manager import TagManager
 
 
 @dataclass
@@ -40,14 +41,18 @@ class PaperSearchEngine:
         self.llm_client = LLMClient(config)
         self.arxiv_config = config["paper_search"]["arxiv"]
         self.semantic_scholar_config = config["paper_search"]["semantic_scholar"]
+        self.tag_manager = TagManager(config.get("storage", {}).get("data_dir", "data"))
     
-    def search(self, query: str, source: str = "arxiv", max_results: int = None) -> List[Paper]:
+    def search(self, query: str, source: str = "arxiv", max_results: int = None, 
+               start_date: str = None, end_date: str = None) -> List[Paper]:
         """搜索论文
         
         Args:
             query: 搜索查询
             source: 搜索源 (arxiv, semantic_scholar)
             max_results: 最大结果数
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
             
         Returns:
             论文列表
@@ -56,11 +61,83 @@ class PaperSearchEngine:
         optimized_query = self._optimize_query(query)
         
         if source == "arxiv":
-            return self._search_arxiv(optimized_query, max_results)
+            return self._search_arxiv(optimized_query, max_results, start_date, end_date)
         elif source == "semantic_scholar":
-            return self._search_semantic_scholar(optimized_query, max_results)
+            return self._search_semantic_scholar(optimized_query, max_results, start_date, end_date)
         else:
             raise ValueError(f"不支持的搜索源: {source}")
+    
+    def search_by_time_range(self, query: str, days_back: int = 7, source: str = "arxiv", 
+                            max_results: int = None) -> List[Paper]:
+        """按时间范围搜索论文
+        
+        Args:
+            query: 搜索查询
+            days_back: 向前搜索的天数
+            source: 搜索源
+            max_results: 最大结果数
+            
+        Returns:
+            论文列表
+        """
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        
+        return self.search(query, source, max_results, start_date, end_date)
+    
+    def search_latest_papers(self, source: str = "arxiv", max_results: int = 50) -> List[Paper]:
+        """搜索最新论文（用于标签推送）
+        
+        Args:
+            source: 搜索源
+            max_results: 最大结果数
+            
+        Returns:
+            论文列表
+        """
+        # 搜索最近3天的论文
+        return self.search_by_time_range("", days_back=3, source=source, max_results=max_results)
+    
+    def check_and_notify_new_papers(self) -> int:
+        """检查并推送新论文
+        
+        Returns:
+            推送的论文数量
+        """
+        # 获取用户标签
+        tags = self.tag_manager.get_tags(active_only=True)
+        if not tags:
+            return 0
+        
+        # 搜索最新论文
+        latest_papers = self.search_latest_papers()
+        notification_count = 0
+        
+        for paper in latest_papers:
+            # 检查论文是否匹配用户标签
+            matched_tags = self.tag_manager.match_paper_tags(
+                paper.title, 
+                paper.abstract, 
+                paper.categories or []
+            )
+            
+            if matched_tags:
+                # 检查是否已经推送过
+                existing_notifications = self.tag_manager.get_notifications()
+                if not any(n.paper_id == paper.arxiv_id for n in existing_notifications):
+                    # 添加推送通知
+                    self.tag_manager.add_notification(
+                        paper_id=paper.arxiv_id or paper.title[:50],
+                        title=paper.title,
+                        authors=paper.authors,
+                        abstract=paper.abstract,
+                        published_date=paper.published_date,
+                        pdf_url=paper.pdf_url or "",
+                        matched_tags=matched_tags
+                    )
+                    notification_count += 1
+        
+        return notification_count
     
     def _optimize_query(self, query: str) -> str:
         """使用LLM优化搜索查询
@@ -98,12 +175,15 @@ class PaperSearchEngine:
             print(f"⚠️  查询优化失败，使用原始查询: {e}")
             return query
     
-    def _search_arxiv(self, query: str, max_results: int = None) -> List[Paper]:
+    def _search_arxiv(self, query: str, max_results: int = None, 
+                     start_date: str = None, end_date: str = None) -> List[Paper]:
         """搜索arXiv
         
         Args:
             query: 搜索查询
             max_results: 最大结果数
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
             
         Returns:
             论文列表
@@ -111,9 +191,32 @@ class PaperSearchEngine:
         if max_results is None:
             max_results = self.arxiv_config["max_results"]
         
+        # 构建搜索查询
+        search_query = f"all:{query}" if query.strip() else "cat:*"
+        
+        # 添加时间范围过滤
+        if start_date or end_date:
+            date_filter = []
+            if start_date:
+                # arXiv使用YYYYMMDD格式
+                start_arxiv = start_date.replace("-", "")
+                date_filter.append(f"submittedDate:[{start_arxiv}0000")
+            if end_date:
+                end_arxiv = end_date.replace("-", "")
+                if start_date:
+                    date_filter.append(f"TO {end_arxiv}2359]")
+                else:
+                    date_filter.append(f"submittedDate:[* TO {end_arxiv}2359]")
+            
+            if date_filter:
+                if query.strip():
+                    search_query += f" AND {''.join(date_filter)}"
+                else:
+                    search_query = ''.join(date_filter)
+        
         # 构建arXiv API查询
         params = {
-            "search_query": f"all:{query}",
+            "search_query": search_query,
             "start": 0,
             "max_results": max_results,
             "sortBy": self.arxiv_config["sort_by"],
@@ -200,12 +303,15 @@ class PaperSearchEngine:
         
         return papers
     
-    def _search_semantic_scholar(self, query: str, max_results: int = None) -> List[Paper]:
+    def _search_semantic_scholar(self, query: str, max_results: int = None, 
+                                start_date: str = None, end_date: str = None) -> List[Paper]:
         """搜索Semantic Scholar
         
         Args:
             query: 搜索查询
             max_results: 最大结果数
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
             
         Returns:
             论文列表
@@ -220,8 +326,19 @@ class PaperSearchEngine:
         params = {
             "query": query,
             "limit": max_results,
-            "fields": "title,authors,abstract,year,openAccessPdf,externalIds"
+            "fields": "title,authors,abstract,year,openAccessPdf,externalIds,publicationDate"
         }
+        
+        # 添加时间范围过滤
+        if start_date:
+            start_year = int(start_date[:4])
+            params["year"] = f"{start_year}-"
+        if end_date:
+            end_year = int(end_date[:4])
+            if "year" in params:
+                params["year"] = f"{start_year}-{end_year}"
+            else:
+                params["year"] = f"-{end_year}"
         
         try:
             url = f"{self.semantic_scholar_config['base_url']}/paper/search"
