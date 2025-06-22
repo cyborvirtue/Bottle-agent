@@ -1186,15 +1186,33 @@ class WebInterface:
             # 显示调试信息
             st.info(f"📊 共有 {len(lesson_plan.ppt_scripts)} 页讲稿")
             
-            # 页面选择器 - 使用教案标题作为唯一key
+            # 页面选择器 - 使用更稳定的key和默认值
             page_options = [f"第{script.page_number}页: {script.page_title}" for script in lesson_plan.ppt_scripts]
-            unique_key = f"preview_page_selector_{lesson_plan.title}_{len(lesson_plan.ppt_scripts)}"
-            selected_page = st.selectbox("选择要查看的页面", page_options, key=unique_key)
+            unique_key = f"preview_page_selector_{hash(lesson_plan.title)}_{len(lesson_plan.ppt_scripts)}"
+            
+            # 确保有默认选择
+            default_index = 0
+            if unique_key in st.session_state:
+                try:
+                    # 保持之前的选择
+                    prev_selection = st.session_state[unique_key]
+                    if prev_selection in page_options:
+                        default_index = page_options.index(prev_selection)
+                except:
+                    default_index = 0
+            
+            selected_page = st.selectbox(
+                "选择要查看的页面", 
+                page_options, 
+                index=default_index,
+                key=unique_key
+            )
             
             # 调试信息
             st.write(f"🔍 当前选择: {selected_page}")
             st.write(f"📋 可选页面: {page_options[:5]}{'...' if len(page_options) > 5 else ''}")
             
+            # 确保总是有选择的页面
             if selected_page:
                 # 提取选中的页码
                 selected_page_number = int(selected_page.split('页')[0].replace('第', ''))
@@ -1213,35 +1231,66 @@ class WebInterface:
                 
                 if script:
                     st.success(f"✅ 找到第{script.page_number}页讲稿")
+                    
+                    # 强制显示内容，不依赖额外的if判断
+                    with st.container():
+                        # 显示页面信息
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"### 📄 {script.page_title}")
+                        with col2:
+                            st.info(f"⏱️ {script.estimated_time}")
+                        
+                        # 显示讲稿内容
+                        st.markdown("#### 💬 完整讲稿")
+                        st.markdown(f"```\n{script.script_content}\n```")
+                        
+                        # 显示重点和技巧
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if script.key_points:
+                                st.markdown("#### 🎯 重点提示")
+                                for point in script.key_points:
+                                    st.write(f"• {point}")
+                        
+                        with col2:
+                            if script.teaching_tips:
+                                st.markdown("#### 💡 教学技巧")
+                                for tip in script.teaching_tips:
+                                    st.write(f"• {tip}")
                 else:
                     st.error(f"❌ 未找到第{selected_page_number}页讲稿")
-                
-                if script:
-                    
-                    # 显示页面信息
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.markdown(f"### 📄 {script.page_title}")
-                    with col2:
-                        st.info(f"⏱️ {script.estimated_time}")
-                    
-                    # 显示讲稿内容
-                    st.markdown("#### 💬 完整讲稿")
-                    st.markdown(f"```\n{script.script_content}\n```")
-                    
-                    # 显示重点和技巧
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if script.key_points:
-                            st.markdown("#### 🎯 重点提示")
-                            for point in script.key_points:
-                                st.write(f"• {point}")
-                    
-                    with col2:
-                        if script.teaching_tips:
-                            st.markdown("#### 💡 教学技巧")
-                            for tip in script.teaching_tips:
-                                st.write(f"• {tip}")
+            else:
+                 # 如果没有选择，显示第一页
+                 if lesson_plan.ppt_scripts:
+                     script = lesson_plan.ppt_scripts[0]
+                     st.warning("⚠️ 未选择页面，显示第一页内容")
+                     
+                     with st.container():
+                         # 显示页面信息
+                         col1, col2 = st.columns([3, 1])
+                         with col1:
+                             st.markdown(f"### 📄 {script.page_title}")
+                         with col2:
+                             st.info(f"⏱️ {script.estimated_time}")
+                         
+                         # 显示讲稿内容
+                         st.markdown("#### 💬 完整讲稿")
+                         st.markdown(f"```\n{script.script_content}\n```")
+                         
+                         # 显示重点和技巧
+                         col1, col2 = st.columns(2)
+                         with col1:
+                             if script.key_points:
+                                 st.markdown("#### 🎯 重点提示")
+                                 for point in script.key_points:
+                                     st.write(f"• {point}")
+                         
+                         with col2:
+                             if script.teaching_tips:
+                                 st.markdown("#### 💡 教学技巧")
+                                 for tip in script.teaching_tips:
+                                     st.write(f"• {tip}")
         
         # 传统教学环节（兼容性）
         elif lesson_plan.sections:
