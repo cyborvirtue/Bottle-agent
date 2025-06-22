@@ -12,10 +12,10 @@ llm:
   
   # 火山引擎配置（当provider为volcengine时使用）
   volcengine:
-    base_url: "" # your model url
-    api_key: ""  #your ARK_API_KEY
-    model: "deepseek-r1-250120"  # model type
-    timeout: 1800  
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    api_key: "e61f4de8-e1f5-4996-ad2a-0592736be467"  # 火山引擎API密钥，或设置环境变量ARK_API_KEY
+    model: "deepseek-r1-250120"  # 火山引擎模型ID
+    timeout: 1800  # 深度思考模型建议设置较长超时时间
 
 
 
@@ -27,7 +27,7 @@ embedding:
   provider: "openai"  # 支持: openai, huggingface
   model: "doubao-embedding-text-240715"  # 火山引擎嵌入模型
   # model: "sentence-transformers/all-MiniLM-L6-v2"  # HuggingFace模型示例
-  api_key: ""  # 火山引擎API密钥
+  api_key: "4298902b-e0b2-490e-b306-b0c31508338e"  # 火山引擎API密钥
   base_url: "https://ark.cn-beijing.volces.com/api/v3"  # 火山引擎API地址
   batch_size: 8
   max_length: 512
@@ -36,7 +36,7 @@ embedding:
 paper_search:
   # arXiv配置
   arxiv:
-    base_url: ""
+    base_url: "http://export.arxiv.org/api/query"
     max_results: 20
     sort_by: "relevance"  # relevance, lastUpdatedDate, submittedDate
     sort_order: "descending"  # ascending, descending

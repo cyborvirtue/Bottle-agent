@@ -10,6 +10,9 @@ import pandas as pd
 from typing import Dict, Any, List
 from pathlib import Path
 import time
+import os
+import json
+from datetime import datetime
 
 # 尝试导入streamlit
 try:
@@ -30,6 +33,14 @@ class WebInterface:
         self.search_engine = search_engine
         self.kb_manager = kb_manager
         self.config = config
+        
+        # 初始化教案设计生成器
+        try:
+            from ..rag_system.lesson_plan_generator import TeachingScriptGenerator
+            self.lesson_plan_generator = TeachingScriptGenerator(config, kb_manager)
+        except ImportError as e:
+            print(f"⚠️  教案设计生成器初始化失败: {e}")
+            self.lesson_plan_generator = None
     
     def run(self):
         """运行Web界面"""
@@ -49,7 +60,7 @@ class WebInterface:
         self._render_sidebar()
         
         # 主内容区域
-        tab1, tab2, tab3, tab4 = st.tabs(["📚 论文搜索", "🏷️ 标签管理", "🧠 RAG问答", "⚙️ 知识库管理"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📚 论文搜索", "🏷️ 标签管理", "🧠 RAG问答", "⚙️ 知识库管理", "📝 教案设计"])
         
         with tab1:
             self._render_paper_search()
@@ -62,6 +73,9 @@ class WebInterface:
         
         with tab4:
             self._render_kb_management()
+        
+        with tab5:
+            self._render_lesson_plan_generator()
     
     def _render_sidebar(self):
         """渲染侧边栏"""
@@ -411,11 +425,29 @@ class WebInterface:
         # 侧边栏配置
         with st.sidebar:
             st.subheader("⚙️ 对话配置")
+            
+            # 初始化知识库选择状态
+            if "selected_kb" not in st.session_state:
+                st.session_state.selected_kb = kb_list[0] if kb_list else None
+            
+            # 确保选择的知识库仍然存在于列表中
+            if st.session_state.selected_kb not in kb_list:
+                st.session_state.selected_kb = kb_list[0] if kb_list else None
+            
             selected_kb = st.selectbox(
                 "选择知识库",
                 kb_list,
-                help="选择要查询的知识库"
+                index=kb_list.index(st.session_state.selected_kb) if st.session_state.selected_kb in kb_list else 0,
+                help="选择要查询的知识库",
+                key="rag_kb_selector"
             )
+            
+            # 更新session state
+            if selected_kb != st.session_state.selected_kb:
+                st.session_state.selected_kb = selected_kb
+                # 当知识库切换时，清空对话历史（可选）
+                if st.checkbox("切换知识库时清空对话历史", value=True, key="clear_on_switch"):
+                    st.session_state.chat_history = []
             
             top_k = st.slider(
                 "相关文档数",
@@ -933,6 +965,436 @@ class WebInterface:
                     if st.form_submit_button("❌ 取消"):
                         st.session_state.show_new_agent = False
                         st.rerun()
+    
+    def _render_lesson_plan_generator(self):
+        """渲染教案设计生成器界面"""
+        st.header("📝 教案设计生成器")
+        
+        if not self.lesson_plan_generator:
+            st.error("❌ 教案设计生成器未正确初始化")
+            return
+        
+        # 创建两列布局
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("📤 上传教学材料")
+            
+            # 文件上传区域
+            uploaded_files = st.file_uploader(
+                "选择文件",
+                type=['pdf', 'md'],
+                accept_multiple_files=True,
+                help="支持PPT的PDF格式和Markdown格式的教学大纲"
+            )
+            
+            # 教案配置
+            st.subheader("⚙️ 教案配置")
+            
+            with st.form("lesson_plan_config"):
+                col_config1, col_config2 = st.columns(2)
+                
+                with col_config1:
+                    subject = st.text_input("学科", placeholder="例如：数学、语文、英语")
+                    grade_level = st.text_input("年级", placeholder="例如：高一、初二")
+                
+                with col_config2:
+                    # 选择智能体
+                    agents = list(self.kb_manager.agent_manager.agents.keys())
+                    if not agents:
+                        agents = ["默认助手"]
+                    
+                    selected_agent = st.selectbox(
+                        "选择智能体角色",
+                        agents,
+                        help="选择不同的智能体角色来生成不同风格的教案"
+                    )
+                
+                additional_context = st.text_area(
+                    "额外要求",
+                    placeholder="例如：注重实践操作、增加互动环节、适合在线教学等",
+                    height=100
+                )
+                
+                # 生成按钮
+                generate_button = st.form_submit_button(
+                    "🚀 生成教案",
+                    use_container_width=True,
+                    type="primary"
+                )
+            
+            # 处理文件上传和教案生成
+            if generate_button:
+                if not uploaded_files:
+                    st.error("❌ 请至少上传一个文件")
+                else:
+                    self._process_lesson_plan_generation(
+                        uploaded_files, selected_agent, subject, 
+                        grade_level, additional_context
+                    )
+        
+        with col2:
+            st.subheader("📚 历史教案")
+            
+            # 显示历史教案列表
+            try:
+                lesson_plans = self.lesson_plan_generator.list_teaching_scripts()
+                
+                if lesson_plans:
+                    for plan in lesson_plans[:10]:  # 只显示最近10个
+                        with st.expander(f"📄 {plan['title']}"):
+                            st.write(f"**学科**: {plan['subject']}")
+                            st.write(f"**年级**: {plan['grade_level']}")
+                            st.write(f"**创建时间**: {plan['created_at'][:19]}")
+                            
+                            # 避免列布局嵌套，使用垂直布局
+                            if st.button(f"👁️ 查看详情", key=f"view_{plan['filename']}"):
+                                self._show_lesson_plan_details(plan['file_path'])
+                            
+                            if st.button(f"📥 下载教案", key=f"download_{plan['filename']}"):
+                                self._download_lesson_plan(plan['file_path'])
+                else:
+                    st.info("暂无历史教案")
+                    
+            except Exception as e:
+                st.error(f"❌ 加载历史教案失败: {e}")
+    
+    def _process_lesson_plan_generation(self, uploaded_files, agent_name, 
+                                       subject, grade_level, additional_context):
+        """处理教案生成流程"""
+        try:
+            # 创建进度条
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # 保存上传的文件
+            temp_dir = Path("/tmp/lesson_plan_temp")
+            temp_dir.mkdir(exist_ok=True)
+            
+            ppt_path = None
+            outline_path = None
+            
+            status_text.text("📤 处理上传文件...")
+            progress_bar.progress(20)
+            
+            for uploaded_file in uploaded_files:
+                file_path = temp_dir / uploaded_file.name
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                if uploaded_file.name.lower().endswith('.pdf'):
+                    ppt_path = str(file_path)
+                    print(f"[教案生成] 上传PPT文件: {uploaded_file.name}")
+                elif uploaded_file.name.lower().endswith('.md'):
+                    outline_path = str(file_path)
+                    print(f"[教案生成] 上传大纲文件: {uploaded_file.name}")
+            
+            # 如果有PPT文件，先解析获取总页数
+            total_pages = 0
+            if ppt_path:
+                status_text.text("📊 分析PPT结构...")
+                progress_bar.progress(30)
+                try:
+                    import fitz
+                    doc = fitz.open(ppt_path)
+                    total_pages = len(doc)
+                    doc.close()
+                    print(f"[教案生成] PPT总页数: {total_pages}页")
+                    st.info(f"📄 PPT文件包含 {total_pages} 页")
+                except Exception as e:
+                    print(f"[教案生成] 获取PPT页数失败: {e}")
+            
+            status_text.text("🔍 分析教学材料...")
+            progress_bar.progress(40)
+            
+            # 生成教案
+            status_text.text("🤖 生成教案中...")
+            progress_bar.progress(60)
+            
+            lesson_plan, file_path = self.lesson_plan_generator.generate_teaching_script_workflow(
+                ppt_path=ppt_path,
+                outline_path=outline_path,
+                agent_name=agent_name,
+                subject=subject,
+                grade_level=grade_level,
+                additional_context=additional_context,
+                progress_callback=lambda current, total, message: self._update_progress(
+                    progress_bar, status_text, current, total, message
+                )
+            )
+            
+            status_text.text("✅ 教案生成完成！")
+            progress_bar.progress(100)
+            
+            # 显示生成结果
+            st.success(f"✅ 教案生成成功！保存到: {file_path}")
+            
+            # 显示教案预览
+            self._show_lesson_plan_preview(lesson_plan)
+            
+            # 清理临时文件
+            try:
+                for file_path in temp_dir.glob("*"):
+                    file_path.unlink()
+                temp_dir.rmdir()
+            except:
+                pass
+        
+        except Exception as e:
+            st.error(f"❌ 教案生成失败: {e}")
+            import traceback
+            st.error(traceback.format_exc())
+    
+    def _update_progress(self, progress_bar, status_text, current_batch, total_batches, message):
+        """更新进度显示"""
+        # 60-90%用于生成过程
+        progress = 60 + int((current_batch / total_batches) * 30)
+        progress_bar.progress(progress)
+        status_text.text(f"🔄 {message} ({current_batch}/{total_batches})")
+        
+        # 在终端输出详细的进度信息
+        print(f"[教案生成] {message}")
+        print(f"[教案生成] 当前进度: {current_batch}/{total_batches} 批次 ({int(current_batch/total_batches*100)}%)")
+        print(f"[教案生成] 前端进度条: {progress}%")
+        print("-" * 50)
+    
+    def _show_lesson_plan_preview(self, lesson_plan):
+        """显示教案预览"""
+        st.subheader("📋 教学讲稿预览")
+        
+        # 基本信息
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("标题", lesson_plan.title)
+        with col2:
+            st.metric("学科", lesson_plan.subject)
+        with col3:
+            st.metric("年级", lesson_plan.grade_level)
+        with col4:
+            st.metric("总时长", lesson_plan.total_duration)
+        
+        # 教学目标
+        if lesson_plan.objectives:
+            st.subheader("🎯 教学目标")
+            for i, obj in enumerate(lesson_plan.objectives, 1):
+                st.write(f"{i}. {obj}")
+        
+        # PPT讲稿（按页展示）
+        if hasattr(lesson_plan, 'ppt_scripts') and lesson_plan.ppt_scripts:
+            st.subheader("📖 PPT讲稿内容")
+            
+            # 显示调试信息
+            st.info(f"📊 共有 {len(lesson_plan.ppt_scripts)} 页讲稿")
+            
+            # 页面选择器 - 使用教案标题作为唯一key
+            page_options = [f"第{script.page_number}页: {script.page_title}" for script in lesson_plan.ppt_scripts]
+            unique_key = f"preview_page_selector_{lesson_plan.title}_{len(lesson_plan.ppt_scripts)}"
+            selected_page = st.selectbox("选择要查看的页面", page_options, key=unique_key)
+            
+            # 调试信息
+            st.write(f"🔍 当前选择: {selected_page}")
+            st.write(f"📋 可选页面: {page_options[:5]}{'...' if len(page_options) > 5 else ''}")
+            
+            if selected_page:
+                # 提取选中的页码
+                selected_page_number = int(selected_page.split('页')[0].replace('第', ''))
+                st.write(f"🎯 查找页码: {selected_page_number}")
+                
+                # 根据页码找到对应的script
+                script = None
+                available_pages = []
+                for s in lesson_plan.ppt_scripts:
+                    available_pages.append(s.page_number)
+                    if s.page_number == selected_page_number:
+                        script = s
+                        break
+                
+                st.write(f"📄 可用页码: {sorted(available_pages)}")
+                
+                if script:
+                    st.success(f"✅ 找到第{script.page_number}页讲稿")
+                else:
+                    st.error(f"❌ 未找到第{selected_page_number}页讲稿")
+                
+                if script:
+                    
+                    # 显示页面信息
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"### 📄 {script.page_title}")
+                    with col2:
+                        st.info(f"⏱️ {script.estimated_time}")
+                    
+                    # 显示讲稿内容
+                    st.markdown("#### 💬 完整讲稿")
+                    st.markdown(f"```\n{script.script_content}\n```")
+                    
+                    # 显示重点和技巧
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if script.key_points:
+                            st.markdown("#### 🎯 重点提示")
+                            for point in script.key_points:
+                                st.write(f"• {point}")
+                    
+                    with col2:
+                        if script.teaching_tips:
+                            st.markdown("#### 💡 教学技巧")
+                            for tip in script.teaching_tips:
+                                st.write(f"• {tip}")
+        
+        # 传统教学环节（兼容性）
+        elif lesson_plan.sections:
+            st.subheader("📚 教学环节")
+            for i, section in enumerate(lesson_plan.sections, 1):
+                with st.expander(f"环节 {i}: {section.section_title} ({section.duration})"):
+                    st.write(f"**内容**: {section.content}")
+                    if section.teaching_methods:
+                        st.write(f"**教学方法**: {', '.join(section.teaching_methods)}")
+                    if section.key_points:
+                        st.write(f"**重点**: {', '.join(section.key_points)}")
+                    if section.activities:
+                        st.write(f"**活动**: {', '.join(section.activities)}")
+        
+        # 其他信息
+        col1, col2 = st.columns(2)
+        with col1:
+            if lesson_plan.assessment:
+                st.subheader("📊 评估方式")
+                st.write(lesson_plan.assessment)
+        
+        with col2:
+            if lesson_plan.homework:
+                st.subheader("📝 作业安排")
+                st.write(lesson_plan.homework)
+        
+        if lesson_plan.reflection:
+            st.subheader("💭 教学反思")
+            st.write(lesson_plan.reflection)
+    
+    def _show_lesson_plan_details(self, file_path):
+        """显示教案详细信息"""
+        try:
+            lesson_plan = self.lesson_plan_generator.load_teaching_script(file_path)
+            
+            # 在新的容器中显示
+            with st.container():
+                st.markdown("---")
+                self._show_lesson_plan_preview(lesson_plan)
+                
+        except Exception as e:
+            st.error(f"❌ 加载教案失败: {e}")
+    
+    def _download_lesson_plan(self, file_path):
+        """下载教案文件"""
+        try:
+            lesson_plan = self.lesson_plan_generator.load_teaching_script(file_path)
+            
+            # 避免列布局嵌套，使用垂直布局
+            st.write("**选择下载格式：**")
+            
+            # JSON格式下载
+            with open(file_path, 'r', encoding='utf-8') as f:
+                json_content = f.read()
+            
+            st.download_button(
+                label="📥 下载JSON格式",
+                data=json_content,
+                file_name=os.path.basename(file_path),
+                mime="application/json",
+                key=f"json_download_{os.path.basename(file_path)}"
+            )
+            
+            # 文本格式下载
+            text_content = self._format_lesson_plan_as_text(lesson_plan)
+            
+            st.download_button(
+                label="📄 下载文本格式",
+                data=text_content,
+                file_name=f"{lesson_plan.title}_讲稿.txt",
+                mime="text/plain",
+                key=f"text_download_{os.path.basename(file_path)}"
+            )
+            
+        except Exception as e:
+            st.error(f"❌ 下载失败: {e}")
+    
+    def _format_lesson_plan_as_text(self, lesson_plan):
+        """将教学文稿格式化为文本"""
+        lines = []
+        lines.append(f"# {lesson_plan.title}")
+        lines.append(f"学科: {lesson_plan.subject}")
+        lines.append(f"年级: {lesson_plan.grade_level}")
+        lines.append(f"总时长: {getattr(lesson_plan, 'total_duration', getattr(lesson_plan, 'duration', '未知'))}")
+        lines.append(f"创建时间: {lesson_plan.created_at}")
+        lines.append("\n" + "="*50 + "\n")
+        
+        # 课程概述
+        if hasattr(lesson_plan, 'course_overview') and lesson_plan.course_overview:
+            lines.append("## 课程概述")
+            lines.append(lesson_plan.course_overview)
+            lines.append("")
+        
+        # 学习目标
+        objectives = getattr(lesson_plan, 'learning_objectives', getattr(lesson_plan, 'objectives', []))
+        if objectives:
+            lines.append("## 学习目标")
+            for i, obj in enumerate(objectives, 1):
+                lines.append(f"{i}. {obj}")
+            lines.append("")
+        
+        # 所需材料
+        materials = getattr(lesson_plan, 'materials_needed', getattr(lesson_plan, 'materials', []))
+        if materials:
+            lines.append("## 所需材料")
+            for material in materials:
+                lines.append(f"• {material}")
+            lines.append("")
+        
+        # PPT讲稿
+        if hasattr(lesson_plan, 'ppt_scripts') and lesson_plan.ppt_scripts:
+            lines.append("## PPT教学讲稿")
+            lines.append("")
+            
+            for script in lesson_plan.ppt_scripts:
+                lines.append(f"### 第{script.page_number}页: {script.page_title}")
+                lines.append(f"预计时间: {script.estimated_time}")
+                lines.append("")
+                lines.append("#### 完整讲稿:")
+                lines.append(script.script_content)
+                lines.append("")
+                
+                if script.key_points:
+                    lines.append("#### 重点提示:")
+                    for point in script.key_points:
+                        lines.append(f"• {point}")
+                    lines.append("")
+                
+                if script.teaching_tips:
+                    lines.append("#### 教学技巧:")
+                    for tip in script.teaching_tips:
+                        lines.append(f"• {tip}")
+                    lines.append("")
+                
+                lines.append("-" * 30 + "\n")
+        
+        # 兼容性字段：其他信息（仅在旧格式教案中显示）
+        if hasattr(lesson_plan, 'assessment') and lesson_plan.assessment:
+            lines.append("## 评估方式")
+            lines.append(lesson_plan.assessment)
+            lines.append("")
+        
+        if hasattr(lesson_plan, 'homework') and lesson_plan.homework:
+            lines.append("## 作业安排")
+            lines.append(lesson_plan.homework)
+            lines.append("")
+        
+        if hasattr(lesson_plan, 'reflection') and lesson_plan.reflection:
+            lines.append("## 教学反思")
+            lines.append(lesson_plan.reflection)
+            lines.append("")
+        
+        return "\n".join(lines)
 
 
 def run_streamlit_app(search_engine, kb_manager, config):

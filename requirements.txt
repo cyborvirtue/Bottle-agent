@@ -10,6 +10,7 @@ pdfplumber
 PyPDF2>=3.0.0
 python-docx>=0.8.11
 markdown>=3.4.0
+PyMuPDF>=1.23.0  # PDF处理库，用于教案设计功能
 
 # 向量数据库
 faiss-cpu>=1.7.4
